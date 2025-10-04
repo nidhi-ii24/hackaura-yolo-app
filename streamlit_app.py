@@ -1,9 +1,10 @@
 import streamlit as st
-import cv2
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import av
 from ultralytics import YOLO
 import numpy as np
 from PIL import Image
-import time
+import cv2
 
 # Page configuration
 st.set_page_config(
@@ -103,7 +104,7 @@ st.markdown("""
     }
     
     [data-testid="stMetricLabel"] {
-        color: #e2e8f0;
+        color: #ffffff !important;
         font-weight: 600;
         font-size: 1rem !important;
     }
@@ -226,7 +227,7 @@ st.markdown("""
         padding: 1rem;
         border-radius: 8px;
         margin: 1rem 0;
-        color: #cbd5e1;
+        color: #e2e8f0;
     }
             
     /* Sidebar text improvements */
@@ -257,6 +258,12 @@ def load_model():
     return YOLO('final.pt')
 
 model = load_model()
+
+# Initialize session state for stats
+if 'object_count' not in st.session_state:
+    st.session_state.object_count = 0
+if 'frame_count' not in st.session_state:
+    st.session_state.frame_count = 0
 
 # Header
 st.markdown('<h1 class="main-title">🔥 HackAura Real-Time Detection</h1>', unsafe_allow_html=True)
@@ -301,8 +308,8 @@ with st.sidebar:
     # Instructions
     st.markdown("### 📖 Instructions")
     st.markdown("""
-    1. Click **Start Webcam** below
-    2. Allow camera access
+    1. Click **START** below
+    2. Allow camera access in browser
     3. Watch real-time detection
     4. Adjust confidence threshold
     """)
@@ -313,24 +320,9 @@ col1, col2 = st.columns([2, 1])
 with col1:
     st.markdown("### 📹 Live Detection Feed")
     
-    # Status indicator
-    st.markdown("""
-    <div class="status-active">
-        <span class="status-dot"></span>
-        <span>Ready to Stream</span>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Webcam control
-    run_webcam = st.checkbox('🎥 Start Webcam', value=False)
-    
-    # Video placeholder
-    FRAME_WINDOW = st.image([])
-    
-    # Info box
     st.markdown("""
     <div class="info-box">
-        💡 <strong>Tip:</strong> Make sure your webcam is connected and browser permissions are granted.
+        💡 <strong>Tip:</strong> Click START and allow camera permissions when prompted by your browser.
     </div>
     """, unsafe_allow_html=True)
 
@@ -343,49 +335,53 @@ with col2:
     metric3 = st.empty()
     metric4 = st.empty()
 
-# Run webcam detection
-if run_webcam:
-    camera = cv2.VideoCapture(0)
+# Video processor class for WebRTC
+class VideoProcessor:
+    def __init__(self):
+        self.confidence = confidence
+        self.model = model
     
-    if not camera.isOpened():
-        st.error("❌ Could not access webcam. Please check your camera connection and permissions.")
+    def recv(self, frame):
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Run YOLO detection
+        results = self.model(img, conf=self.confidence)
+        
+        # Update detection stats
+        st.session_state.object_count = len(results[0].boxes)
+        st.session_state.frame_count += 1
+        
+        # Get annotated frame
+        annotated_img = results[0].plot()
+        
+        return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
+
+# WebRTC Configuration for deployment
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+# WebRTC Streamer
+with col1:
+    webrtc_ctx = webrtc_streamer(
+        key="yolo-detection",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=RTC_CONFIGURATION,
+        video_processor_factory=VideoProcessor,
+        media_stream_constraints={"video": True, "audio": False},
+        async_processing=True,
+    )
+
+# Update metrics continuously
+with col2:
+    metric1.metric("🎯 Objects Detected", f"{st.session_state.object_count}")
+    metric2.metric("📊 Confidence", f"{int(confidence * 100)}%")
+    metric3.metric("⚡ Frames Processed", f"{st.session_state.frame_count}")
+    
+    if webrtc_ctx.state.playing:
+        metric4.metric("🔍 Status", "Active", delta="Running")
     else:
-        frame_count = 0
-        object_count = 0
-        
-        while run_webcam:
-            ret, frame = camera.read()
-            if not ret:
-                st.warning("⚠️ Failed to grab frame from webcam")
-                break
-            
-            # Run YOLO detection
-            results = model(frame, conf=confidence)
-            
-            # Get annotated frame
-            annotated_frame = results[0].plot()
-            
-            # Convert BGR to RGB
-            frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-            
-            # Update metrics
-            frame_count += 1
-            object_count = len(results[0].boxes)
-            
-            # Display frame
-            FRAME_WINDOW.image(frame_rgb, use_container_width=True)
-            
-            # Update stats in sidebar
-            with col2:
-                metric1.metric("🎯 Objects Detected", f"{object_count}")
-                metric2.metric("📊 Confidence", f"{int(confidence * 100)}%")
-                metric3.metric("⚡ Frames Processed", f"{frame_count}")
-                metric4.metric("🔍 Status", "Active", delta="Running")
-            
-            # Small delay to prevent overwhelming
-            time.sleep(0.01)
-        
-        camera.release()
+        metric4.metric("🔍 Status", "Ready", delta="Stopped")
 
 # Features section
 st.markdown("---")
