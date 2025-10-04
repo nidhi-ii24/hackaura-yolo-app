@@ -1,11 +1,8 @@
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-import av
 import cv2
 from ultralytics import YOLO
 import numpy as np
 from PIL import Image
-import time
 
 # Page configuration
 st.set_page_config(
@@ -263,8 +260,8 @@ model = load_model()
 # Initialize session state
 if 'object_count' not in st.session_state:
     st.session_state.object_count = 0
-if 'frame_count' not in st.session_state:
-    st.session_state.frame_count = 0
+if 'detected_classes' not in st.session_state:
+    st.session_state.detected_classes = {}
 
 # Header
 st.markdown('<h1 class="main-title">🔥 HackAura Real-Time Detection</h1>', unsafe_allow_html=True)
@@ -294,14 +291,6 @@ with st.sidebar:
         help="Minimum confidence for detections"
     )
     
-    # Detection mode selection
-    st.markdown("---")
-    detection_mode = st.radio(
-        "Detection Mode",
-        ["WebRTC (Cloud/Network)", "Local Webcam (Desktop)"],
-        help="Use WebRTC for deployed apps, Local for desktop testing"
-    )
-    
     st.markdown("---")
     
     # Model info
@@ -316,157 +305,89 @@ with st.sidebar:
     
     # Instructions
     st.markdown("### 📖 Instructions")
-    if detection_mode == "WebRTC (Cloud/Network)":
-        st.markdown("""
-        1. Click **START** below
-        2. Allow camera access
-        3. Watch real-time detection
-        4. Adjust confidence threshold
-        """)
-    else:
-        st.markdown("""
-        1. Check **Start Webcam** below
-        2. Wait for camera to initialize
-        3. Watch real-time detection
-        4. Uncheck to stop
-        """)
+    st.markdown("""
+    1. Click **Take a picture** below
+    2. Allow camera access
+    3. Capture image
+    4. View detection results
+    5. Adjust confidence threshold
+    """)
 
 # Main content
 col1, col2 = st.columns([2, 1])
-
-with col2:
-    st.markdown("### 📈 Detection Stats")
-    
-    # Metrics placeholders
-    metric1 = st.empty()
-    metric2 = st.empty()
-    metric3 = st.empty()
-    metric4 = st.empty()
-
-# Video processor class for WebRTC
-class VideoProcessor:
-    def __init__(self):
-        self.confidence = confidence
-    
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        
-        # Run YOLO detection
-        results = model(img, conf=self.confidence)
-        
-        # Update session state
-        st.session_state.object_count = len(results[0].boxes)
-        st.session_state.frame_count += 1
-        
-        # Get annotated frame
-        annotated_img = results[0].plot()
-        
-        return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
-
-# WebRTC Configuration
-RTC_CONFIGURATION = RTCConfiguration({
-    "iceServers": [
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-    ]
-})
 
 with col1:
     st.markdown("### 📹 Live Detection Feed")
     
     st.markdown("""
     <div class="info-box">
-        💡 <strong>Tip:</strong> Select detection mode from sidebar. Use WebRTC for deployed apps, Local for testing.
+        💡 <strong>Tip:</strong> Click "Take a picture" and allow camera permissions when prompted.
     </div>
     """, unsafe_allow_html=True)
     
-    # WebRTC Mode (for deployed apps)
-    if detection_mode == "WebRTC (Cloud/Network)":
-        webrtc_ctx = webrtc_streamer(
-            key="yolo-object-detection",
-            mode=WebRtcMode.SENDRECV,
-            rtc_configuration=RTC_CONFIGURATION,
-            video_processor_factory=VideoProcessor,
-            media_stream_constraints={
-                "video": {
-                    "width": {"ideal": 1280},
-                    "height": {"ideal": 720},
-                },
-                "audio": False
-            },
-            async_processing=True,
-        )
-        
-        # Update metrics for WebRTC
-        with col2:
-            metric1.metric("🎯 Objects Detected", f"{st.session_state.object_count}")
-            metric2.metric("📊 Confidence", f"{int(confidence * 100)}%")
-            metric3.metric("⚡ Frames", f"{st.session_state.frame_count}")
-            
-            if webrtc_ctx.state.playing:
-                metric4.metric("🔍 Status", "Active", delta="Live")
-            else:
-                metric4.metric("🔍 Status", "Ready")
+    # Status indicator
+    st.markdown("""
+    <div class="status-active">
+        <span class="status-dot"></span>
+        <span>Ready to Capture</span>
+    </div>
+    """, unsafe_allow_html=True)
     
-    # Local Webcam Mode (for desktop testing)
+    # Camera input
+    img_file_buffer = st.camera_input("📸 Take a picture")
+    
+    if img_file_buffer is not None:
+        # Convert to opencv image
+        bytes_data = img_file_buffer.getvalue()
+        img = cv2.imdecode(np.frombuffer(bytes_data, np.uint8), cv2.IMREAD_COLOR)
+        
+        # Run YOLO detection
+        with st.spinner('🔍 Running detection...'):
+            results = model(img, conf=confidence)
+        
+        # Get annotated frame
+        annotated_img = results[0].plot()
+        
+        # Display result
+        st.image(cv2.cvtColor(annotated_img, cv2.COLOR_BGR2RGB), 
+                 caption="Detection Result", 
+                 use_container_width=True)
+        
+        # Update session state
+        st.session_state.object_count = len(results[0].boxes)
+        
+        # Get detected classes
+        if len(results[0].boxes) > 0:
+            classes = [model.names[int(box.cls)] for box in results[0].boxes]
+            st.session_state.detected_classes = {cls: classes.count(cls) for cls in set(classes)}
+        else:
+            st.session_state.detected_classes = {}
+        
+        # Success message
+        if st.session_state.object_count > 0:
+            st.success(f"✅ Detected {st.session_state.object_count} object(s)")
+        else:
+            st.info("ℹ️ No objects detected. Try adjusting the confidence threshold.")
+
+with col2:
+    st.markdown("### 📈 Detection Stats")
+    
+    # Metrics
+    if img_file_buffer is not None:
+        st.metric("🎯 Objects Detected", f"{st.session_state.object_count}")
+        st.metric("📊 Confidence", f"{int(confidence * 100)}%")
+        st.metric("🔍 Status", "Complete", delta="✓")
+        
+        # Show detected classes
+        if st.session_state.detected_classes:
+            st.markdown("---")
+            st.markdown("### 🏷️ Detected Classes")
+            for cls, count in st.session_state.detected_classes.items():
+                st.write(f"**{cls}:** {count}")
     else:
-        # Status indicator
-        st.markdown("""
-        <div class="status-active">
-            <span class="status-dot"></span>
-            <span>Ready to Stream</span>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        # Webcam control
-        run_webcam = st.checkbox('🎥 Start Webcam', value=False)
-        
-        # Video placeholder
-        FRAME_WINDOW = st.image([])
-        
-        # Run webcam detection
-        if run_webcam:
-            camera = cv2.VideoCapture(0)
-            
-            if not camera.isOpened():
-                st.error("❌ Could not access webcam. Please check your camera connection and permissions.")
-            else:
-                frame_count = 0
-                object_count = 0
-                
-                while run_webcam:
-                    ret, frame = camera.read()
-                    if not ret:
-                        st.warning("⚠️ Failed to grab frame from webcam")
-                        break
-                    
-                    # Run YOLO detection
-                    results = model(frame, conf=confidence)
-                    
-                    # Get annotated frame
-                    annotated_frame = results[0].plot()
-                    
-                    # Convert BGR to RGB
-                    frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Update metrics
-                    frame_count += 1
-                    object_count = len(results[0].boxes)
-                    
-                    # Display frame
-                    FRAME_WINDOW.image(frame_rgb, use_container_width=True)
-                    
-                    # Update stats
-                    with col2:
-                        metric1.metric("🎯 Objects Detected", f"{object_count}")
-                        metric2.metric("📊 Confidence", f"{int(confidence * 100)}%")
-                        metric3.metric("⚡ Frames Processed", f"{frame_count}")
-                        metric4.metric("🔍 Status", "Active", delta="Running")
-                    
-                    # Small delay to prevent overwhelming
-                    time.sleep(0.01)
-                
-                camera.release()
+        st.metric("🎯 Objects Detected", "-")
+        st.metric("📊 Confidence", f"{int(confidence * 100)}%")
+        st.metric("🔍 Status", "Waiting")
 
 # Features section
 st.markdown("---")
